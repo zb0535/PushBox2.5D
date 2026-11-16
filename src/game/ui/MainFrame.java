@@ -24,15 +24,18 @@ import java.awt.GridBagLayout;
 import java.awt.Insets;
 import java.awt.event.ActionEvent;
 import java.awt.event.KeyEvent;
+import java.util.ArrayList;
+import java.util.List;
 
 /**
- * 실행 진입점. CardLayout으로 화면(시작 / 게임 / 클리어)을 전환한다.
- * 레벨 선택, 일시정지, 설정 화면은 나중에 카드로 추가하면 된다.
+ * 실행 진입점. CardLayout으로 화면(시작 / 레벨 선택 / 게임 / 클리어)을 전환한다.
+ * 일시정지, 설정 화면은 나중에 카드로 추가하면 된다.
  */
 public class MainFrame extends JFrame {
 
     // 화면 이름 (CardLayout 키)
     private static final String SCREEN_MENU = "MENU";
+    private static final String SCREEN_LEVELS = "LEVELS";
     private static final String SCREEN_GAME = "GAME";
     private static final String SCREEN_CLEAR = "CLEAR";
 
@@ -44,12 +47,14 @@ public class MainFrame extends JFrame {
     private final GameController controller;
 
     private final GamePanel gamePanel;
+    private final LevelSelectPanel levelSelectPanel;
     private final JLabel clearInfoLabel = new JLabel("", SwingConstants.CENTER);
     private final Timer clearWatcher;
 
     private String currentScreen = SCREEN_MENU;
     private boolean clearPending = false;
     private Timer clearDelay;   // 클리어 후 화면 전환 대기 타이머 (취소할 수 있게 필드로 보관)
+    private int currentLevelIndex = 0;   // 지금 플레이 중인(마지막으로 고른) 레벨 번호, 0부터
 
     public MainFrame() {
         super("Sokoban 2.5D");
@@ -60,8 +65,11 @@ public class MainFrame extends JFrame {
         this.view = game;
         this.controller = game;
         this.gamePanel = new GamePanel(view, controller);
+        this.levelSelectPanel = new LevelSelectPanel(
+                createPlaceholderLevels(), this::startLevel, () -> showScreen(SCREEN_MENU));
 
-        root.add(new MenuPanel(this::startGame, this::openSettings, this::exitGame), SCREEN_MENU);
+        root.add(new MenuPanel(this::openLevelSelect, this::openSettings, this::exitGame), SCREEN_MENU);
+        root.add(levelSelectPanel, SCREEN_LEVELS);
         root.add(gamePanel, SCREEN_GAME);
         root.add(createClearScreen(), SCREEN_CLEAR);
         add(root);
@@ -91,9 +99,41 @@ public class MainFrame extends JFrame {
         } else {
             clearWatcher.stop();
             cancelClearDelay();   // ESC 등으로 게임 화면을 벗어나면 대기 중인 클리어 전환도 취소
+            if (SCREEN_LEVELS.equals(name)) {
+                // 마지막으로 고른 레벨에 포커스를 두면 키보드로 바로 이어서 고를 수 있다
+                SwingUtilities.invokeLater(() -> levelSelectPanel.focusLevel(currentLevelIndex));
+            }
         }
     }
 
+    private void openLevelSelect() {
+        showScreen(SCREEN_LEVELS);
+    }
+
+    /**
+     * 레벨 선택 화면에서 레벨을 골랐을 때.
+     * TODO: 지금은 GameController에 "N번 레벨 불러오기"가 없어서 번호를 기억만 하고 MockGame을 처음부터 시작한다.
+     *       로직 담당과 레벨 로딩 방식(loadLevel(int) 또는 레벨별 GameView/GameController 팩토리)이 정해지면
+     *       이 메서드 안에서 index로 해당 레벨을 불러오도록 바꾼다.
+     */
+    private void startLevel(int index) {
+        currentLevelIndex = index;
+        startGame();
+    }
+
+    /**
+     * 레벨 목록 (임시). MockGame은 맵이 하나뿐이라 모든 레벨이 같은 맵이다.
+     * 레벨 목록 형식과 읽는 주체가 정해지면 실제 목록으로 교체한다.
+     */
+    private static List<LevelSelectPanel.LevelInfo> createPlaceholderLevels() {
+        List<LevelSelectPanel.LevelInfo> levels = new ArrayList<>();
+        for (int i = 1; i <= 6; i++) {
+            levels.add(new LevelSelectPanel.LevelInfo("임시 맵"));
+        }
+        return levels;
+    }
+
+    /** 현재 레벨을 처음부터 시작하고 게임 화면으로 간다. (클리어 화면의 "다시 하기"도 이걸 쓴다) */
     private void startGame() {
         controller.restart();
         cancelClearDelay();
@@ -197,7 +237,8 @@ public class MainFrame extends JFrame {
         getRootPane().getActionMap().put("backToMenu", new AbstractAction() {
             @Override
             public void actionPerformed(ActionEvent e) {
-                if (SCREEN_GAME.equals(currentScreen)) {
+                // 게임 중, 레벨 선택 중 모두 ESC는 시작 화면으로
+                if (SCREEN_GAME.equals(currentScreen) || SCREEN_LEVELS.equals(currentScreen)) {
                     showScreen(SCREEN_MENU);
                 }
             }

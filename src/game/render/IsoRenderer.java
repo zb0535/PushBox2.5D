@@ -31,6 +31,12 @@ public class IsoRenderer {
     /** true면 박스가 벽 뒤에 가려질 때도 그 벽을 반투명으로 그린다. false면 플레이어 기준으로만. */
     public static final boolean FADE_FOR_BOXES = true;
 
+    /**
+     * true면 목표 칸이 벽 뒤에 가려질 때도 그 벽을 반투명으로 그린다.
+     * 벽(40px)이 바로 앞 칸의 바닥을 통째로 덮기 때문에, 맨 앞줄의 목표는 이 옵션이 없으면 보이지 않는다.
+     */
+    public static final boolean FADE_FOR_GOALS = true;
+
     private static final int HW = TILE_W / 2;
     private static final int HH = TILE_H / 2;
 
@@ -114,7 +120,7 @@ public class IsoRenderer {
     }
 
     /**
-     * (wx, wy)의 벽이 플레이어(또는 박스)를 가리는 위치에 있는지 판단한다.
+     * (wx, wy)의 벽이 플레이어(또는 박스, 목표 칸)를 가리는 위치에 있는지 판단한다.
      * 벽 기준으로 FADE_DX/DY만큼 "뒤쪽"에 대상이 있으면 true.
      */
     private boolean coversTarget(GameView view, int wx, int wy, int playerX, int playerY) {
@@ -125,6 +131,9 @@ public class IsoRenderer {
                 return true;
             }
             if (FADE_FOR_BOXES && view.hasBox(tx, ty)) {
+                return true;
+            }
+            if (FADE_FOR_GOALS && view.getTile(tx, ty) == TileType.GOAL) {
                 return true;
             }
         }
