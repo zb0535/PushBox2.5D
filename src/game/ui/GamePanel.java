@@ -9,20 +9,34 @@ import javax.swing.AbstractAction;
 import javax.swing.JComponent;
 import javax.swing.JPanel;
 import javax.swing.KeyStroke;
+import javax.swing.Timer;
 import java.awt.Color;
 import java.awt.Dimension;
 import java.awt.Font;
 import java.awt.FontMetrics;
 import java.awt.Graphics;
 import java.awt.Graphics2D;
+import java.awt.Point;
 import java.awt.event.ActionEvent;
+import java.awt.event.ComponentAdapter;
+import java.awt.event.ComponentEvent;
 import java.awt.event.KeyEvent;
 
 /**
- * 게임 화면 패널: 렌더러 호출 + 키 입력 처리 + 간단한 HUD.
+ * 게임 화면 패널: 렌더러 호출 + 키 입력 처리 + 이동 애니메이션 시간 관리 + 간단한 HUD.
  * 로직 클래스는 GameView / GameController 인터페이스로만 접근한다.
+ *
+ * 이동 애니메이션: 로직은 move() 즉시 최종 상태로 바뀐다. 이 패널이 move() 전후의 GameView 상태를 비교해
+ * (플레이어 좌표 변화, 플레이어 앞 칸의 박스가 밀렸는지) 출발 -> 도착 보간을 렌더러에 시킨다.
+ * 규칙 판단은 하지 않고 읽기만 한다. 모든 메서드는 EDT에서만 호출한다.
  */
 public class GamePanel extends JPanel {
+
+    /** 이동 애니메이션 길이(ms) */
+    private static final int MOVE_DURATION_MS = 110;
+    /** 애니메이션 타이머 간격(ms), 약 60fps */
+    private static final int FRAME_MS = 16;
+    private static final long MOVE_DURATION_NANOS = MOVE_DURATION_MS * 1_000_000L;
 
     private final GameView view;
     private final GameController controller;
@@ -39,6 +53,10 @@ public class GamePanel extends JPanel {
     private int cachedMoveCount = -1;
     private String moveText = "";
 
+    // 이동 애니메이션 타이머 (javax.swing.Timer는 EDT에서 동작한다). 필요할 때만 돌린다.
+    private final Timer animTimer = new Timer(FRAME_MS, e -> onAnimationTick());
+    private long animStartNanos;
+
     public GamePanel(GameView view, GameController controller) {
         this.view = view;
         this.controller = controller;
@@ -48,6 +66,73 @@ public class GamePanel extends JPanel {
         setFocusable(true);
 
         setupKeyBindings();
+
+        // 다른 화면(CardLayout)으로 벗어날 때 진행 중인 애니메이션을 정리한다. (다시 들어올 때 오래된 상태가 남지 않게)
+        addComponentListener(new ComponentAdapter() {
+            @Override
+            public void componentHidden(ComponentEvent e) {
+                cancelAnimation();
+            }
+        });
+    }
+
+    // ---------------------------------------------------------------
+    // 이동 애니메이션
+    // ---------------------------------------------------------------
+
+    /**
+     * 방향 이동을 요청하고, 실제로 좌표가 바뀌었으면 보간 애니메이션을 시작한다.
+     * 진행 중인 애니메이션이 있으면 먼저 즉시 완료해 연타가 끊기지 않게 한다.
+     */
+    private void moveWithAnimation(Direction dir) {
+        cancelAnimation();   // 진행 중이면 도착 위치로 스냅 (로직 상태는 이미 도착 상태다)
+
+        Point before = view.getPlayerPos();
+        int aheadX = before.x + dir.dx;     // 플레이어 앞 칸 (박스가 있으면 밀리는 칸)
+        int aheadY = before.y + dir.dy;
+        boolean boxWasAhead = view.hasBox(aheadX, aheadY);
+
+        controller.move(dir);
+
+        // 반환값 대신 실제 좌표 변화로 판단한다: 벽에 막히면 좌표가 그대로라 애니메이션을 실행하지 않는다.
+        Point after = view.getPlayerPos();
+        if (after.x == before.x && after.y == before.y) {
+            return;
+        }
+
+        // 박스 밀기: 이동 전 앞 칸에 박스가 있었고, 이동 후 플레이어가 그 칸에 들어갔으며,
+        // 박스가 한 칸 너머에 새로 놓여 있는 경우 (읽기만 한다)
+        int boxToX = aheadX + dir.dx;
+        int boxToY = aheadY + dir.dy;
+        boolean pushed = boxWasAhead
+                && after.x == aheadX && after.y == aheadY
+                && view.hasBox(boxToX, boxToY);
+
+        renderer.startMoveAnimation(before.x, before.y, after.x, after.y, pushed, aheadX, aheadY, boxToX, boxToY);
+        animStartNanos = System.nanoTime();
+        animTimer.restart();
+    }
+
+    /** 애니메이션 타이머 틱: 진행률을 렌더러에 넘기고 다시 그린다. 끝나면 정리한다. */
+    private void onAnimationTick() {
+        float t = (System.nanoTime() - animStartNanos) / (float) MOVE_DURATION_NANOS;
+        if (t >= 1f) {
+            cancelAnimation();   // 완료: 타이머 정지 + 최종 위치로 그리기
+        } else {
+            renderer.setMoveProgress(t);
+        }
+        repaint();
+    }
+
+    /**
+     * 진행 중인 이동 애니메이션을 보간 없이 즉시 목표 위치로 스냅하고 타이머를 정리한다.
+     * undo / restart / 스테이지 변경 직전에 부른다. 외부(MainFrame 등)에서 레벨을 바꿀 때도 쓸 수 있다.
+     * 진행 중이 아니면 아무 일도 하지 않는다. (재생성/재등록 없음)
+     */
+    public void cancelAnimation() {
+        animTimer.stop();
+        renderer.clearMoveAnimation();
+        repaint();
     }
 
     /** Key Bindings 등록 (KeyListener보다 포커스 문제가 적다) */
@@ -57,13 +142,14 @@ public class GamePanel extends JPanel {
         bindMove(Direction.LEFT,  KeyEvent.VK_LEFT,  KeyEvent.VK_A);
         bindMove(Direction.RIGHT, KeyEvent.VK_RIGHT, KeyEvent.VK_D);
 
-        bindKey(KeyEvent.VK_Z, "undo",    true,  controller::undo);
-        bindKey(KeyEvent.VK_R, "restart", false, controller::restart);
+        // undo / restart는 보간 없이 즉시 스냅: 먼저 진행 중인 애니메이션을 정리한 뒤 로직을 호출한다.
+        bindKey(KeyEvent.VK_Z, "undo",    true,  () -> { cancelAnimation(); controller.undo(); });
+        bindKey(KeyEvent.VK_R, "restart", false, () -> { cancelAnimation(); controller.restart(); });
     }
 
     private void bindMove(Direction dir, int... keyCodes) {
         for (int code : keyCodes) {
-            bindKey(code, "move_" + dir + "_" + code, true, () -> controller.move(dir));
+            bindKey(code, "move_" + dir + "_" + code, true, () -> moveWithAnimation(dir));
         }
     }
 

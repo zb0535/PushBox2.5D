@@ -71,6 +71,63 @@ public class IsoRenderer {
     private final int[] leftX = new int[4], leftY = new int[4];
     private final int[] rightX = new int[4], rightY = new int[4];
 
+    // ---------------------------------------------------------------
+    // 이동 애니메이션 상태 (EDT에서만 접근한다)
+    // GameView는 항상 "이동이 끝난 최종 상태"를 돌려주므로, 렌더러는 출발 칸 -> 도착 칸을
+    // 진행률만큼 보간해서 그린다. 상태를 GamePanel이 넣어 주고(start/setProgress/clear),
+    // 시간 흐름(Timer)은 GamePanel이 관리한다.
+    // ---------------------------------------------------------------
+    private boolean moveActive = false;
+    private float moveEase = 0f;                       // ease-out이 적용된 진행률 (0~1)
+    private int pFromX, pFromY, pToX, pToY;            // 플레이어 출발/도착 칸
+    private int pKeyX, pKeyY;                          // 플레이어를 그릴 차례의 칸 (출발/도착 중 앞쪽)
+    private boolean boxMoves = false;                  // 박스도 함께 미끄러지는지
+    private int bFromX, bFromY, bToX, bToY;            // 박스 출발/도착 칸
+    private int bKeyX, bKeyY;                          // 박스를 그릴 차례의 칸 (출발/도착 중 앞쪽)
+
+    /**
+     * 이동 애니메이션을 시작한다. 진행률은 0에서 시작한다.
+     * 이미 진행 중이던 애니메이션은 덮어쓴다. (GamePanel이 먼저 clearMoveAnimation으로 마무리한다)
+     *
+     * @param boxMoves true면 박스 (bFrom -> bTo)가 플레이어와 같은 방향으로 함께 미끄러진다
+     */
+    public void startMoveAnimation(int playerFromX, int playerFromY, int playerToX, int playerToY,
+                                   boolean boxMoves, int boxFromX, int boxFromY, int boxToX, int boxToY) {
+        this.pFromX = playerFromX; this.pFromY = playerFromY;
+        this.pToX = playerToX;     this.pToY = playerToY;
+        this.boxMoves = boxMoves;
+        this.bFromX = boxFromX;    this.bFromY = boxFromY;
+        this.bToX = boxToX;        this.bToY = boxToY;
+
+        // 깊이 정렬 기준 칸: 출발/도착 중 x+y가 큰(화면 앞쪽) 칸. 뒤쪽 칸 기준으로 그리면 앞쪽 벽에 파묻힌다.
+        if (pFromX + pFromY >= pToX + pToY) { pKeyX = pFromX; pKeyY = pFromY; } else { pKeyX = pToX; pKeyY = pToY; }
+        if (bFromX + bFromY >= bToX + bToY) { bKeyX = bFromX; bKeyY = bFromY; } else { bKeyX = bToX; bKeyY = bToY; }
+
+        this.moveEase = 0f;
+        this.moveActive = true;
+    }
+
+    /** 진행률 t(0.0~1.0, 선형)를 받아 ease-out을 적용해 저장한다. */
+    public void setMoveProgress(float t) {
+        float c = Math.max(0f, Math.min(1f, t));
+        moveEase = 1f - (1f - c) * (1f - c);
+    }
+
+    /** 애니메이션을 끝내고 최종 위치(GameView 상태)로 즉시 그리게 한다. */
+    public void clearMoveAnimation() {
+        moveActive = false;
+        boxMoves = false;
+        moveEase = 0f;
+    }
+
+    public boolean hasMoveAnimation() {
+        return moveActive;
+    }
+
+    private static float lerp(int from, int to, float t) {
+        return from + (to - from) * t;
+    }
+
     /** 화면 한가운데에 맵이 오도록 배치해서 전체 장면을 그린다. */
     public void render(Graphics2D g2, GameView view, int panelW, int panelH) {
         g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
@@ -87,6 +144,29 @@ public class IsoRenderer {
         Point player = view.getPlayerPos();   // 프레임당 1회만 조회
         int playerX = player.x;
         int playerY = player.y;
+
+        // 애니메이션 유효성 검사: GameView가 애니메이션의 도착 상태와 다르면(undo/restart/레벨 교체 등)
+        // 오래된 애니메이션이므로 무시하고 현재 상태 그대로 그린다.
+        boolean animating = moveActive && playerX == pToX && playerY == pToY;
+        boolean boxAnimating = animating && boxMoves && view.hasBox(bToX, bToY);
+
+        // 보간된 격자 좌표(소수) -> 화면 좌표. 프레임당 한 번만 계산한다.
+        int movingPlayerSx = 0, movingPlayerSy = 0, movingBoxSx = 0, movingBoxSy = 0;
+        boolean movingBoxOnGoal = false;
+        if (animating) {
+            float fx = lerp(pFromX, pToX, moveEase);
+            float fy = lerp(pFromY, pToY, moveEase);
+            movingPlayerSx = originX + Math.round((fx - fy) * HW);
+            movingPlayerSy = originY + Math.round((fx + fy) * HH);
+        }
+        if (boxAnimating) {
+            float bx = lerp(bFromX, bToX, moveEase);
+            float by = lerp(bFromY, bToY, moveEase);
+            movingBoxSx = originX + Math.round((bx - by) * HW);
+            movingBoxSy = originY + Math.round((bx + by) * HH);
+            // 목표 위 색(초록)은 절반 지점에서 출발 칸 -> 도착 칸 기준으로 바뀐다
+            movingBoxOnGoal = (moveEase < 0.5f ? view.getTile(bFromX, bFromY) : view.getTile(bToX, bToY)) == TileType.GOAL;
+        }
 
         // 깊이 정렬: x+y가 작은 대각선(뒤쪽)부터 큰 대각선(앞쪽) 순으로 그린다.
         for (int d = 0; d <= w + h - 2; d++) {
@@ -109,11 +189,21 @@ public class IsoRenderer {
                     continue;
                 }
                 drawFloor(g2, sx, sy, tile == TileType.GOAL);
-                if (view.hasBox(gx, gy)) {
+                // 이동 중인 박스의 도착 칸은 여기서 그리지 않고, 아래에서 보간 위치로 따로 그린다
+                boolean boxInTransit = boxAnimating && gx == bToX && gy == bToY;
+                if (view.hasBox(gx, gy) && !boxInTransit) {
                     drawBlock(g2, sx, sy, BOX_H, tile == TileType.GOAL ? BOX_GOAL_COLORS : BOX_COLORS, false);
                 }
-                if (playerX == gx && playerY == gy) {
+                if (!animating && playerX == gx && playerY == gy) {
                     drawPlayer(g2, sx, sy);
+                }
+
+                // 이동 중인 오브젝트는 출발/도착 중 앞쪽 칸의 차례에 그린다. (박스 -> 플레이어 순)
+                if (boxAnimating && gx == bKeyX && gy == bKeyY) {
+                    drawBlock(g2, movingBoxSx, movingBoxSy, BOX_H, movingBoxOnGoal ? BOX_GOAL_COLORS : BOX_COLORS, false);
+                }
+                if (animating && gx == pKeyX && gy == pKeyY) {
+                    drawPlayer(g2, movingPlayerSx, movingPlayerSy);
                 }
             }
         }
